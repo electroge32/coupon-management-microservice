@@ -1,0 +1,113 @@
+# =============================================================================
+# ADIPA Coupon Management Microservice — Version A (FastAPI)
+# =============================================================================
+#
+# Arquitectura de servicios:
+#
+#   db          → MySQL 8.0: base de datos para WordPress/WooCommerce
+#   wordpress   → WordPress con WooCommerce (imagen oficial wordpress:latest)
+#   wpcli       → Contenedor separado con imagen wordpress:cli que ejecuta
+#                 setup-woocommerce.sh. Usamos un servicio dedicado en lugar
+#                 de instalar WP-CLI en el contenedor wordpress para evitar
+#                 conflictos de versiones y mantener el contenedor wordpress
+#                 limpio y sin modificaciones al entrypoint oficial.
+#   app         → Microservicio FastAPI (build desde Dockerfile local)
+#
+# Orden de inicio garantizado por healthchecks:
+#   db (healthy) → wordpress (healthy) → wpcli (runs once) → app
+#
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # db: MySQL 8.0 — base de datos de WordPress
+  # ---------------------------------------------------------------------------
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wpuser
+      MYSQL_PASSWORD: wppassword
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "wpuser", "-pwppassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # wordpress: WordPress + WooCommerce
+  # La imagen oficial wordpress:latest no incluye WP-CLI; el setup lo hace
+  # el servicio wpcli separado una vez que este contenedor esté healthy.
+  # ---------------------------------------------------------------------------
+  wordpress:
+    image: wordpress:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wpuser
+      WORDPRESS_DB_PASSWORD: wppassword
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_TABLE_PREFIX: wp_
+    volumes:
+      - wp_data:/var/www/html
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/wp-login.php"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # wpcli: Servicio de setup one-shot
+  # Usa la imagen wordpress:cli (WP-CLI oficial) y comparte el volumen wp_data
+  # con el contenedor wordpress. Se ejecuta una sola vez (restart: "no") y
+  # genera /var/www/html/wp-content/wc-credentials.env para que el app lo lea.
+  # ---------------------------------------------------------------------------
+  wpcli:
+    image: wordpress:cli
+    depends_on:
+      wordpress:
+        condition: service_healthy
+    volumes:
+      - wp_data:/var/www/html
+      - ./scripts/setup-woocommerce.sh:/setup-woocommerce.sh
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wpuser
+      WORDPRESS_DB_PASSWORD: wppassword
+      WORDPRESS_DB_NAME: wordpress
+    user: root
+    entrypoint: ["/bin/sh", "/setup-woocommerce.sh"]
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # app: Microservicio FastAPI
+  # Monta wp_data en modo lectura para acceder a wc-credentials.env generado
+  # por el servicio wpcli durante el primer arranque.
+  # ---------------------------------------------------------------------------
+  app:
+    build: .
+    depends_on:
+      - wpcli
+    ports:
+      - "8000:8000"
+    volumes:
+      - wp_data:/var/www/html:ro  # acceso de lectura a wc-credentials.env
+    env_file:
+      - .env
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  wp_data:

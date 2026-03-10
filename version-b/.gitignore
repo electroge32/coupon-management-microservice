@@ -1,0 +1,17 @@
+# Laravel
+vendor/
+node_modules/
+.env
+.env.backup
+.phpunit.result.cache
+storage/*.key
+public/hot
+public/storage
+bootstrap/cache/
+
+# SQLite local database
+database/*.sqlite
+database/*.sqlite-journal
+
+# Docker runtime
+.docker/
